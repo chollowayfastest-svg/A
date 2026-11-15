@@ -5,7 +5,10 @@ import {
   Clock,
   Coins,
   Download,
+  ExternalLink,
+  FileSpreadsheet,
   FlaskConical,
+  HardDrive,
   ImageOff,
   ImagePlus,
   LayoutGrid,
@@ -20,6 +23,7 @@ import {
   Upload,
   X,
 } from 'lucide-react';
+import { exportFilteredBatchToNewSpreadsheet } from '../lib/googleWorkspace';
 import { normalizeDatasetGrade } from '../shared/ruleEngine';
 import type {
   BatchEvaluatedRow,
@@ -64,6 +68,10 @@ interface BatchLogViewProps {
   onImportCsv: (file: File) => void;
   onOpenAddModal: () => void;
   onOpenBulkUploadModal: () => void;
+  onOpenWorkspace?: () => void;
+  accessToken?: string | null;
+  onEnsureGoogleToken?: () => Promise<string | null>;
+  onAuthExpired?: () => void;
 }
 
 const fmtUsd = (val: number | '') =>
@@ -86,6 +94,10 @@ export const BatchLogView: React.FC<BatchLogViewProps> = ({
   onImportCsv,
   onOpenAddModal,
   onOpenBulkUploadModal,
+  onOpenWorkspace,
+  accessToken,
+  onEnsureGoogleToken,
+  onAuthExpired,
 }) => {
   const [search, setSearch] = useState('');
   const [flagFilter, setFlagFilter] = useState<string>('ALL');
@@ -96,6 +108,13 @@ export const BatchLogView: React.FC<BatchLogViewProps> = ({
   const [bulkEditOpen, setBulkEditOpen] = useState(false);
   const [deletingBulk, setDeletingBulk] = useState(false);
   const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
+  const [exportingSheet, setExportingSheet] = useState(false);
+  const [sheetExportResult, setSheetExportResult] = useState<{
+    title: string;
+    url: string;
+    count: number;
+  } | null>(null);
+  const [sheetExportError, setSheetExportError] = useState<string | null>(null);
   const [autoGrading, setAutoGrading] = useState(false);
   const [autoGradeOrder, setAutoGradeOrder] = useState<string[]>([]);
   const [autoGradeProgress, setAutoGradeProgress] = useState<
@@ -242,6 +261,52 @@ export const BatchLogView: React.FC<BatchLogViewProps> = ({
       setConfirmBulkDelete(false);
     } finally {
       setDeletingBulk(false);
+    }
+  };
+
+  const handleExportToGoogleSheets = async () => {
+    if (filtered.length === 0 || exportingSheet) return;
+    setSheetExportError(null);
+    setExportingSheet(true);
+    try {
+      const token =
+        accessToken || (onEnsureGoogleToken ? await onEnsureGoogleToken() : null);
+      if (!token) {
+        return;
+      }
+
+      const activeFilters: string[] = [];
+      if (seriesFilter !== 'ALL') activeFilters.push(seriesFilter);
+      if (flagFilter !== 'ALL') activeFilters.push(flagFilter);
+      if (search.trim()) activeFilters.push(`"${search.trim()}"`);
+
+      const created = await exportFilteredBatchToNewSpreadsheet(token, filtered, {
+        priceAsOf: settings.priceAsOf,
+        filterLabel: activeFilters.length > 0 ? activeFilters.join(' · ') : 'All Rows',
+      });
+
+      setSheetExportResult({
+        title: created.title,
+        url: created.spreadsheetUrl,
+        count: filtered.length,
+      });
+      onNotify?.(
+        `Exported ${filtered.length} filtered row(s) to Google Sheets: "${created.title}"`,
+      );
+    } catch (err) {
+      const status = (err as { status?: number })?.status;
+      if (status === 401) {
+        onAuthExpired?.();
+        setSheetExportError(
+          'Your Google session expired. Click Export to Google Sheets again to reconnect.',
+        );
+      } else {
+        setSheetExportError(
+          err instanceof Error ? err.message : 'Failed to export to Google Sheets.',
+        );
+      }
+    } finally {
+      setExportingSheet(false);
     }
   };
 
@@ -518,6 +583,36 @@ export const BatchLogView: React.FC<BatchLogViewProps> = ({
 
           <button
             type="button"
+            onClick={handleExportToGoogleSheets}
+            disabled={filtered.length === 0 || exportingSheet}
+            title={
+              filtered.length === 0
+                ? 'No filtered batch records to export'
+                : `Create a new Google Sheet with ${filtered.length} filtered coin record(s)`
+            }
+            className="px-3 py-2 text-xs font-semibold text-emerald-800 border border-emerald-300 bg-emerald-50 hover:bg-emerald-100 rounded-md inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-45 disabled:cursor-not-allowed cursor-pointer"
+          >
+            {exportingSheet ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <FileSpreadsheet className="w-3.5 h-3.5" />
+            )}
+            {exportingSheet ? 'Exporting Sheet...' : 'Export to Google Sheets'}
+          </button>
+
+          {onOpenWorkspace && (
+            <button
+              type="button"
+              onClick={onOpenWorkspace}
+              className="px-3 py-2 text-xs font-semibold text-[#1E3A5F] border border-[#1E3A5F]/35 bg-slate-50 hover:bg-slate-100 rounded-md inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <HardDrive className="w-3.5 h-3.5" />
+              Drive &amp; Sheets
+            </button>
+          )}
+
+          <button
+            type="button"
             onClick={onResetSeed}
             className="px-3 py-2 text-xs font-semibold text-red-700 border border-red-200 bg-red-50 hover:bg-red-100 rounded-md inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
           >
@@ -727,6 +822,56 @@ export const BatchLogView: React.FC<BatchLogViewProps> = ({
                 {deletingBulk
                   ? 'Deleting...'
                   : `Confirm Delete (${selectedIds.size})`}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {sheetExportError && (
+          <div className="border border-red-200 bg-red-50 rounded-md px-3.5 py-2.5 flex items-center justify-between gap-3 text-xs text-red-900">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-red-700 shrink-0" />
+              <span>{sheetExportError}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSheetExportError(null)}
+              className="text-red-700 hover:text-red-900 cursor-pointer"
+              aria-label="Dismiss Google Sheets export error"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        )}
+
+        {sheetExportResult && (
+          <div className="border border-emerald-200 bg-emerald-50 rounded-md px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs text-emerald-900">
+            <div className="flex items-center gap-2 min-w-0">
+              <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
+              <span className="truncate">
+                Created Google Sheet{' '}
+                <strong className="font-semibold">{sheetExportResult.title}</strong>{' '}
+                (<span className="font-mono tabular-nums">{sheetExportResult.count}</span>{' '}
+                filtered rows)
+              </span>
+            </div>
+            <div className="flex items-center gap-3 shrink-0">
+              <a
+                href={sheetExportResult.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-semibold text-emerald-800 hover:underline inline-flex items-center gap-1"
+              >
+                Open in Google Sheets
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+              <button
+                type="button"
+                onClick={() => setSheetExportResult(null)}
+                className="text-emerald-700 hover:text-emerald-900 cursor-pointer"
+                aria-label="Dismiss Google Sheets export banner"
+              >
+                <X className="w-4 h-4" />
               </button>
             </div>
           </div>

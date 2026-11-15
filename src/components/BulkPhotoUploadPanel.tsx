@@ -2,6 +2,7 @@ import React, { useRef, useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
+  FolderOpen,
   ImagePlus,
   LayoutGrid,
   Loader2,
@@ -10,6 +11,10 @@ import {
   Table2,
   Trash2,
 } from 'lucide-react';
+import {
+  downloadDriveImageAsDataUrl,
+  openGooglePicker,
+} from '../lib/googleWorkspace';
 import type { BatchRawInput, CoinSeries } from '../shared/types';
 
 interface StagedPhotoItem {
@@ -33,6 +38,8 @@ interface StagedPhotoItem {
 interface BulkPhotoUploadPanelProps {
   onBulkSubmit: (items: Array<Partial<BatchRawInput>>) => Promise<void>;
   onClose: () => void;
+  accessToken?: string | null;
+  onEnsureGoogleToken?: () => Promise<string | null>;
 }
 
 async function readAndCompressImage(
@@ -89,9 +96,12 @@ async function readAndCompressImage(
 export const BulkPhotoUploadPanel: React.FC<BulkPhotoUploadPanelProps> = ({
   onBulkSubmit,
   onClose,
+  accessToken,
+  onEnsureGoogleToken,
 }) => {
   const [staged, setStaged] = useState<StagedPhotoItem[]>([]);
   const [dragging, setDragging] = useState(false);
+  const [pickingDrive, setPickingDrive] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeProgress, setAnalyzeProgress] = useState<{
     done: number;
@@ -101,6 +111,61 @@ export const BulkPhotoUploadPanel: React.FC<BulkPhotoUploadPanelProps> = ({
   const [viewMode, setViewMode] = useState<'grid' | 'table'>('grid');
   const [error, setError] = useState<string | null>(null);
   const cancelAnalysisRef = useRef(false);
+
+  const handlePickFromDrive = async () => {
+    setError(null);
+    setPickingDrive(true);
+    try {
+      const token = accessToken || (onEnsureGoogleToken ? await onEnsureGoogleToken() : null);
+      if (!token) {
+        setPickingDrive(false);
+        return;
+      }
+      const picked = await openGooglePicker({
+        accessToken: token,
+        mode: 'images',
+        multiselect: true,
+        title: 'Pick Coin Photographs from Google Drive',
+      });
+      if (picked.length === 0) return;
+
+      const imported: StagedPhotoItem[] = [];
+      for (const file of picked) {
+        const { dataUrl, mimeType } = await downloadDriveImageAsDataUrl(
+          token,
+          file.id,
+          file.mimeType,
+        );
+        imported.push({
+          localId: `${file.id}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          filename: file.name,
+          mimeType,
+          imageDataUrl: dataUrl,
+          proposedSeries: 'Classic Morgan',
+          coinYear: '',
+          coinMint: '',
+          proposedVariety: '',
+          confidencePct: '',
+          suggestedGrade: '',
+          guideLow: '',
+          guideHigh: '',
+          diagnosticNotes: `Imported from Google Drive (${file.id})`,
+          aiStatus: 'staged',
+        });
+      }
+      if (imported.length > 0) {
+        setStaged((prev) => [...prev, ...imported]);
+      }
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : 'Unable to import photos from Google Drive.',
+      );
+    } finally {
+      setPickingDrive(false);
+    }
+  };
 
   const stageFiles = async (fileList: FileList | File[]) => {
     setError(null);
@@ -305,6 +370,25 @@ export const BulkPhotoUploadPanel: React.FC<BulkPhotoUploadPanelProps> = ({
           }}
         />
       </label>
+
+      <div className="flex flex-wrap items-center justify-between gap-2 border border-slate-200 rounded-md px-3.5 py-2.5 bg-white">
+        <span className="text-xs text-slate-600">
+          Or pick coin photographs stored in your Google Drive using Google Picker.
+        </span>
+        <button
+          type="button"
+          onClick={handlePickFromDrive}
+          disabled={pickingDrive || analyzing || submitting}
+          className="px-3 py-1.5 text-xs font-semibold text-[#1E3A5F] border border-[#1E3A5F]/35 bg-slate-50 hover:bg-slate-100 rounded-md inline-flex items-center gap-1.5 disabled:opacity-50 whitespace-nowrap cursor-pointer"
+        >
+          {pickingDrive ? (
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          ) : (
+            <FolderOpen className="w-3.5 h-3.5" />
+          )}
+          {pickingDrive ? 'Importing from Drive...' : 'Pick Photos from Google Drive'}
+        </button>
+      </div>
 
       {/* Staged Action Toolbar */}
       {staged.length > 0 && (

@@ -9,6 +9,8 @@ interface AddCoinModalProps {
   onClose: () => void;
   onSubmit: (payload: Partial<BatchRawInput>) => Promise<void>;
   onBulkSubmit: (items: Array<Partial<BatchRawInput>>) => Promise<void>;
+  accessToken?: string | null;
+  onEnsureGoogleToken?: () => Promise<string | null>;
 }
 
 export const AddCoinModal: React.FC<AddCoinModalProps> = ({
@@ -17,6 +19,8 @@ export const AddCoinModal: React.FC<AddCoinModalProps> = ({
   onClose,
   onSubmit,
   onBulkSubmit,
+  accessToken,
+  onEnsureGoogleToken,
 }) => {
   const [mode, setMode] = useState<'single' | 'bulk'>(initialMode);
   const [photoId, setPhotoId] = useState('');
@@ -197,7 +201,12 @@ export const AddCoinModal: React.FC<AddCoinModalProps> = ({
         </div>
 
         {mode === 'bulk' ? (
-          <BulkPhotoUploadPanel onBulkSubmit={onBulkSubmit} onClose={onClose} />
+          <BulkPhotoUploadPanel
+            onBulkSubmit={onBulkSubmit}
+            onClose={onClose}
+            accessToken={accessToken}
+            onEnsureGoogleToken={onEnsureGoogleToken}
+          />
         ) : (
         <form onSubmit={handleSubmit} className="p-6 space-y-5">
           {error && (

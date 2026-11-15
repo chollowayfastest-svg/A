@@ -1,10 +1,13 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import type { User } from 'firebase/auth';
 import {
   BookOpen,
   ClipboardCheck,
   FileSpreadsheet,
+  HardDrive,
   LayoutDashboard,
   ListChecks,
+  LogOut,
   Menu,
   Plus,
   SlidersHorizontal,
@@ -13,11 +16,19 @@ import {
 import { AddCoinModal } from './components/AddCoinModal';
 import { BatchLogView } from './components/BatchLogView';
 import { CoinDetailModal } from './components/CoinDetailModal';
+import { GoogleSignInButton } from './components/GoogleSignInButton';
+import { GoogleWorkspaceView } from './components/GoogleWorkspaceView';
 import { PortfolioView } from './components/PortfolioView';
 import { ReferenceView } from './components/ReferenceView';
 import { ReviewQueueView } from './components/ReviewQueueView';
 import { SettingsQaView } from './components/SettingsQaView';
 import { WorkbookFormulasView } from './components/WorkbookFormulasView';
+import {
+  clearAccessToken,
+  googleSignIn,
+  initAuth,
+  logout,
+} from './lib/googleAuth';
 import { toBatchCsv } from './shared/ruleEngine';
 import type {
   BatchEvaluatedRow,
@@ -27,12 +38,20 @@ import type {
   WorkbookSettings,
 } from './shared/types';
 
-type TabKey = 'dashboard' | 'batch' | 'queue' | 'reference' | 'formulas' | 'settings';
+type TabKey =
+  | 'dashboard'
+  | 'batch'
+  | 'queue'
+  | 'workspace'
+  | 'reference'
+  | 'formulas'
+  | 'settings';
 
 const NAV_ITEMS: Array<{ key: TabKey; label: string; icon: React.ComponentType<{ className?: string }> }> = [
   { key: 'dashboard', label: 'Portfolio Summary', icon: LayoutDashboard },
   { key: 'batch', label: 'Batch Log', icon: ListChecks },
   { key: 'queue', label: 'Review Queue', icon: ClipboardCheck },
+  { key: 'workspace', label: 'Google Drive & Sheets', icon: HardDrive },
   { key: 'reference', label: 'Price Data & Varieties', icon: BookOpen },
   { key: 'formulas', label: 'Workbook Formulas', icon: FileSpreadsheet },
   { key: 'settings', label: 'Settings & QA Suite', icon: SlidersHorizontal },
@@ -49,11 +68,82 @@ export default function App() {
   const [addModalMode, setAddModalMode] = useState<'single' | 'bulk'>('single');
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
+  // Google Workspace Auth State (token kept strictly in memory)
+  const [needsAuth, setNeedsAuth] = useState(true);
+  const [googleUser, setGoogleUser] = useState<User | null>(null);
+  const [accessToken, setAccessToken] = useState<string | null>(null);
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+
   const notify = useCallback((msg: string) => {
     setToast(msg);
     setTimeout(() => {
       setToast((cur) => (cur === msg ? null : cur));
     }, 3200);
+  }, []);
+
+  useEffect(() => {
+    const unsubscribe = initAuth(
+      (u, token) => {
+        setGoogleUser(u);
+        setAccessToken(token);
+        setNeedsAuth(false);
+      },
+      () => {
+        setAccessToken(null);
+        setNeedsAuth(true);
+      },
+    );
+    return () => unsubscribe();
+  }, []);
+
+  const handleGoogleLogin = useCallback(async () => {
+    setIsLoggingIn(true);
+    try {
+      const result = await googleSignIn();
+      setGoogleUser(result.user);
+      setAccessToken(result.accessToken);
+      setNeedsAuth(false);
+      notify(`Connected Google account (${result.user.email || 'Workspace'})`);
+    } catch (err) {
+      notify(
+        err instanceof Error ? err.message : 'Google sign-in was cancelled or failed',
+      );
+    } finally {
+      setIsLoggingIn(false);
+    }
+  }, [notify]);
+
+  const handleEnsureGoogleToken = useCallback(async (): Promise<string | null> => {
+    if (accessToken && !needsAuth) return accessToken;
+    setIsLoggingIn(true);
+    try {
+      const result = await googleSignIn();
+      setGoogleUser(result.user);
+      setAccessToken(result.accessToken);
+      setNeedsAuth(false);
+      return result.accessToken;
+    } catch (err) {
+      notify(
+        err instanceof Error ? err.message : 'Google sign-in was cancelled or failed',
+      );
+      return null;
+    } finally {
+      setIsLoggingIn(false);
+    }
+  }, [accessToken, needsAuth, notify]);
+
+  const handleGoogleLogout = useCallback(async () => {
+    await logout();
+    setGoogleUser(null);
+    setAccessToken(null);
+    setNeedsAuth(true);
+    notify('Signed out of Google Workspace');
+  }, [notify]);
+
+  const handleAuthExpired = useCallback(() => {
+    clearAccessToken();
+    setAccessToken(null);
+    setNeedsAuth(true);
   }, []);
 
   const fetchState = useCallback(async () => {
@@ -248,6 +338,43 @@ export default function App() {
     notify(`Imported ${data.imported} CSV rows`);
   };
 
+  const handleImportCsvText = async (
+    csvText: string,
+    mode: 'append' | 'replace' = 'append',
+  ): Promise<number> => {
+    const res = await fetch('/api/batch/import-csv', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ csvText, mode }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || 'Import failed');
+    }
+    setState(data.state as WorkbenchState);
+    return Number(data.imported || 0);
+  };
+
+  const handleImportJsonSnapshot = async (snapshotText: string): Promise<number> => {
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(snapshotText);
+    } catch {
+      throw new Error('Selected file is not valid JSON.');
+    }
+    const res = await fetch('/api/batch/import-json', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ snapshot: parsedJson, mode: 'append' }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data.error || 'JSON snapshot import failed');
+    }
+    setState(data.state as WorkbenchState);
+    return Number(data.imported || 0);
+  };
+
   const handleExportCsv = () => {
     if (!state) return;
     const csv = toBatchCsv(state.batchRows);
@@ -348,26 +475,59 @@ export default function App() {
           })}
         </nav>
 
-        {state && (
-          <div className="p-4 border-t border-slate-200 text-xs text-slate-500 space-y-1">
-            <div className="flex justify-between">
-              <span>Threshold</span>
-              <span className="font-mono tabular-nums text-slate-800">
-                {state.settings.confidenceThreshold}%
-              </span>
+        <div className="p-4 border-t border-slate-200 space-y-3">
+          {needsAuth || !accessToken ? (
+            <div className="space-y-1.5">
+              <div className="text-[11px] font-semibold text-slate-600">
+                Google Drive &amp; Sheets
+              </div>
+              <GoogleSignInButton
+                onClick={handleGoogleLogin}
+                loading={isLoggingIn}
+              />
             </div>
-            <div className="flex justify-between">
-              <span>Morgan Melt</span>
-              <span className="font-mono tabular-nums text-slate-800">
-                ${state.summary.meltValuePerMorgan.toFixed(2)}
-              </span>
+          ) : (
+            <div className="flex items-center justify-between gap-2 text-xs">
+              <div className="min-w-0">
+                <div className="font-semibold text-slate-900 truncate">
+                  {googleUser?.displayName || 'Google Connected'}
+                </div>
+                <div className="text-[11px] text-slate-500 font-mono truncate">
+                  {googleUser?.email || 'Drive & Sheets'}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={handleGoogleLogout}
+                title="Sign out of Google"
+                className="p-1.5 text-slate-500 hover:text-slate-900 rounded hover:bg-slate-100 shrink-0 cursor-pointer"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+              </button>
             </div>
-            <div className="flex justify-between">
-              <span>Auto-Accept</span>
-              <span className="text-slate-800">Disabled</span>
+          )}
+
+          {state && (
+            <div className="pt-2 border-t border-slate-100 text-xs text-slate-500 space-y-1">
+              <div className="flex justify-between">
+                <span>Threshold</span>
+                <span className="font-mono tabular-nums text-slate-800">
+                  {state.settings.confidenceThreshold}%
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span>Morgan Melt</span>
+                <span className="font-mono tabular-nums text-slate-800">
+                  ${state.summary.meltValuePerMorgan.toFixed(2)}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span>Auto-Accept</span>
+                <span className="text-slate-800">Disabled</span>
+              </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </aside>
 
       {/* Mobile Drawer */}
@@ -528,6 +688,10 @@ export default function App() {
                     setAddModalMode('bulk');
                     setAddModalOpen(true);
                   }}
+                  onOpenWorkspace={() => setActiveTab('workspace')}
+                  accessToken={accessToken}
+                  onEnsureGoogleToken={handleEnsureGoogleToken}
+                  onAuthExpired={handleAuthExpired}
                 />
               )}
 
@@ -535,6 +699,24 @@ export default function App() {
                 <ReviewQueueView
                   queue={state.reviewQueue}
                   onInspect={(r) => setInspectingId(r.photoId)}
+                />
+              )}
+
+              {activeTab === 'workspace' && (
+                <GoogleWorkspaceView
+                  state={state}
+                  user={googleUser}
+                  accessToken={accessToken}
+                  needsAuth={needsAuth}
+                  isLoggingIn={isLoggingIn}
+                  onLogin={handleGoogleLogin}
+                  onLogout={handleGoogleLogout}
+                  onAuthExpired={handleAuthExpired}
+                  handleBulkAddRecords={handleBulkAddRecords}
+                  onImportCsvText={handleImportCsvText}
+                  onImportJsonSnapshot={handleImportJsonSnapshot}
+                  onOpenBatchLog={() => setActiveTab('batch')}
+                  onNotify={notify}
                 />
               )}
 
@@ -590,6 +772,8 @@ export default function App() {
         onClose={() => setAddModalOpen(false)}
         onSubmit={handleAddRecord}
         onBulkSubmit={handleBulkAddRecords}
+        accessToken={accessToken}
+        onEnsureGoogleToken={handleEnsureGoogleToken}
       />
 
       {/* Toast Notification */}

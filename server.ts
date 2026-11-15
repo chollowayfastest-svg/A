@@ -522,6 +522,74 @@ async function startServer() {
     res.json({ imported: parsed.length, state: buildWorkbenchState(store) });
   });
 
+  app.post('/api/batch/import-json', (req, res) => {
+    const store = ensureStore();
+    const { snapshot, mode } = req.body as {
+      snapshot?: { batchRows?: Partial<BatchRawInput>[]; batchInputs?: Partial<BatchRawInput>[] } | Array<Partial<BatchRawInput>>;
+      mode?: 'append' | 'replace';
+    };
+
+    const rawList = Array.isArray(snapshot)
+      ? snapshot
+      : Array.isArray(snapshot?.batchRows)
+        ? snapshot.batchRows
+        : Array.isArray(snapshot?.batchInputs)
+          ? snapshot.batchInputs
+          : null;
+
+    if (!rawList || rawList.length === 0) {
+      res.status(400).json({ error: 'JSON file does not contain valid batchRows or batchInputs records.' });
+      return;
+    }
+
+    const parsed: BatchRawInput[] = rawList
+      .filter((r) => r && typeof r.photoId === 'string' && r.photoId.trim() !== '')
+      .map((r) => {
+        const suggestedGrade = String(r.suggestedGrade || '').trim();
+        return {
+          photoId: String(r.photoId).trim(),
+          filename: String(r.filename || `${String(r.photoId).toLowerCase()}.jpg`).trim(),
+          proposedSeries: r.proposedSeries || 'Classic Morgan',
+          coinYear: r.coinYear === '' || r.coinYear === undefined ? '' : Number(r.coinYear),
+          coinMint: String(r.coinMint || '').trim(),
+          proposedVariety: String(r.proposedVariety || '').trim(),
+          confidencePct:
+            r.confidencePct === '' || r.confidencePct === undefined
+              ? ''
+              : Math.max(0, Math.min(100, Number(r.confidencePct))),
+          suggestedGrade,
+          datasetGrade: normalizeDatasetGrade(r.datasetGrade || '', suggestedGrade),
+          guideLow: r.guideLow === '' || r.guideLow === undefined ? '' : Number(r.guideLow),
+          guideHigh: r.guideHigh === '' || r.guideHigh === undefined ? '' : Number(r.guideHigh),
+          userAction: r.userAction || '',
+          finalId: String(r.finalId || '').trim(),
+          finalValue: r.finalValue === '' || r.finalValue === undefined ? '' : Number(r.finalValue),
+          valueSourceAsOf: String(r.valueSourceAsOf || store.settings.priceAsOf),
+          diagnosticNotes: String(r.diagnosticNotes || '').trim(),
+          status: r.status || '',
+          imageDataUrl: typeof r.imageDataUrl === 'string' ? r.imageDataUrl : undefined,
+        };
+      });
+
+    if (parsed.length === 0) {
+      res.status(400).json({ error: 'No valid records with photoId found in JSON snapshot.' });
+      return;
+    }
+
+    if (mode === 'replace') {
+      store.batchInputs = parsed;
+    } else {
+      const byId = new Map(store.batchInputs.map((r) => [r.photoId.toUpperCase(), r]));
+      for (const row of parsed) {
+        byId.set(row.photoId.toUpperCase(), row);
+      }
+      store.batchInputs = Array.from(byId.values());
+    }
+
+    saveStore(store);
+    res.json({ imported: parsed.length, state: buildWorkbenchState(store) });
+  });
+
   app.put('/api/settings', (req, res) => {
     const store = ensureStore();
     const body = req.body as Partial<WorkbookSettings>;
