@@ -1,0 +1,6 @@
+{
+  "name": "Morgan & Modern Silver Dollar Appraisal Workbench",
+  "description": "Numismatic appraisal workbench, guardrail-enforced review queue, and audited workbook formula suite for Classic Morgan, 2021+ Morgan, Peace, and American Silver Eagle coins.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
